@@ -1,0 +1,581 @@
+---
+title: "Test and benchmark of MsBackendParquet"
+output:
+  BiocStyle::html_document:
+    toc_float: true
+---
+
+```{r style, echo = FALSE, results = "asis", message = FALSE}
+BiocStyle::markdown()
+```
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(BiocStyle)
+```
+
+# MsBackendParquet
+
+In this notebook, we will test and benchmark the `MsBackendParquet` backend from
+(Computional Metabolomics Research Group)[https://github.com/computational-metabolomics/MsBackendParquet]
+
+```{r, eval = FALSE}
+## BiocManager::install("MsBackendParquet")
+pak::pak("computational-metabolomics/MsBackendParquet")
+```
+
+## Load libraries
+
+```{r}
+library(Spectra)
+library(MsBackendParquet)
+library(microbenchmark)
+library(testthat)
+```
+
+## Test files
+
+```{r}
+file_1 <- MsDataHub::X20171016_POOL_POS_1_105.134.mzML()
+files_2 <- c(MsDataHub::PestMix1_SWATH.mzML(), MsDataHub::PestMix1_DDA.mzML())
+file_gz_1 <- MsDataHub::TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01.20141210.mzML.gz()
+
+files_4 <- c(
+    MsDataHub::PestMix1_DDA.mzML(),
+    MsDataHub::PestMix1_SWATH.mzML(),
+    MsDataHub::X20171016_POOL_POS_1_105.134.mzML(),
+    MsDataHub::X20171016_POOL_POS_3_105.134.mzML())
+```
+
+# Convert mzML to Parquet
+
+First test is to convert the mzML file to Parquet format. With microbenchmark we
+evaluate the efficiency of the process. I use the same parameter in the
+vignette.
+
+### Conversion `file_1` to Parquet format
+
+```{r}
+pq_file_1 <- "./parquet_file/file_1"
+microbenchmark({
+    suppressMessages(be <- mzMLToParquet(file_1, path = pq_file_1,
+                        partitioning = "dataOrigin", overwrite = TRUE))
+}, times = 10L, unit = "s")
+be
+```
+
+### Conversion `files_2` to Parquet format
+
+The package generate a folder with inside a Parquet for each `mzML`.
+
+```{r}
+pq_files_2 <- "./parquet_file/files_2"
+microbenchmark({
+    suppressMessages(be <- mzMLToParquet(files_2, path = pq_files_2,
+                        partitioning = "dataOrigin", overwrite = TRUE))
+}, times = 10L, unit = "s")
+be
+```
+
+### Conversion `file_gz_1` to Parquet format
+
+It handles the compressed files.
+
+```{r}
+pq_file_gz_1 <- "./parquet_file/file_gz_1"
+microbenchmark({
+    suppressMessages(be <- mzMLToParquet(file_gz_1, path = pq_file_gz_1,
+                        partitioning = "dataOrigin", overwrite = TRUE))
+}, times = 10L, unit = "s")
+be
+```
+
+### Conversion `files_4` to Parquet format
+
+The package generate a folder with inside a Parquet for each `mzML`.
+
+```{r}
+pq_files_4 <- "./parquet_file/files_4"
+microbenchmark({
+    suppressMessages(be <- mzMLToParquet(files_4, path = pq_files_4,
+                        partitioning = "dataOrigin", overwrite = TRUE))
+}, times = 10L, unit = "s")
+be
+```
+
+# Test MzR vs Parquet
+
+In this section I will compere the standard method against MsBackendParquet
+
+## `File_1`
+
+Open file with `Spectra()`.
+
+```{r}
+microbenchmark(
+    sps_mzr <- Spectra(file_1, source = MsBackendMzR()),
+    sps_parq <- Spectra(pq_file_1, source = MsBackendParquet()),
+    times = 10L, unit = "s"
+)
+```
+
+Comparing the (small) size, the object based on MsBackendParquet is smaller
+respect the MzR one.
+
+```{r}
+print(object.size(sps_mzr), units = "KB")
+print(object.size(sps_parq), units = "KB")
+```
+
+If we compare `spectraVariables()` between MzR and Parquet there is a
+difference. In the parquet there is an additional variables.
+
+```{r}
+setdiff(spectraVariables(sps_parq), spectraVariables(sps_mzr))
+```
+
+Next I compare the extraction of the peaks using `peaksData()`. The parquet
+method seems faster respect MzR. The function `expect_equal()` confirm that the
+results are the same.
+
+```{r}
+microbenchmark(
+    pks_mzr <- peaksData(sps_mzr),
+    pks_parq <- peaksData(sps_parq),
+    times = 10L, unit = "s"
+)
+
+expect_equal(pks_mzr, pks_parq)
+```
+
+In extracting the data using `spectraData()` the parquet seems a bit slower
+compared to MzR.
+
+```{r}
+microbenchmark(
+    spsData_mzr <- spectraData(sps_mzr, columns = c("msLevel", "spectrumId", "dataStorage")),
+    spsData_parq <- spectraData(sps_parq, columns = c("msLevel", "spectrumId", "dataStorage")),
+    times = 10L, unit = "s"
+)
+
+expect_equal(spsData_mzr, spsData_parq)
+
+```
+
+On the other hand, if we read the full data with `spectraData()`, the Parquet
+format is faster.
+In this case, the `expect_equal()` check fail due to the additional column
+detected before.
+
+```{r}
+microbenchmark(
+    spsData_mzr_full <- spectraData(sps_mzr, columns = union(spectraVariables(sps_mzr),
+                                        peaksVariables(sps_mzr))),
+    spsData_parq_full <- spectraData(sps_parq, columns = union(spectraVariables(sps_parq),
+                                        peaksVariables(sps_parq))),
+    times = 10L, unit = "s"
+)
+
+## expect_equal(spsData_mzr_full, spsData_parq_full)
+
+```
+
+I filter the data, the filter function took ~same time, the parquet object
+continue to use less memory.
+
+```{r}
+microbenchmark(
+    sps_mzr_sub <- filterValues(sps_mzr, spectraVariables = c("basePeakMZ", "rtime"),
+                            values = c(123.089, 230), tolerance = c(0,5),
+                            ppm = c(30, 0), match = "all"),
+    sps_parq_sub <- filterValues(sps_parq, spectraVariables = c("basePeakMZ", "rtime"),
+                            values = c(123.089, 230), tolerance = c(0,5),
+                            ppm = c(30, 0), match = "all"),
+    times = 10L, unit = "s"
+)
+
+print(object.size(sps_mzr_sub), units = "KB")
+print(object.size(sps_parq_sub), units = "KB")
+```
+
+Sice the objects are smaller, also the difference in extracting the peaks is
+smaller.
+
+```{r}
+microbenchmark(
+    pks_mzr_sub <- peaksData(sps_mzr_sub),
+    pks_parq_sub <- peaksData(sps_parq_sub),
+    times = 10L, unit = "s"
+)
+
+expect_equal(pks_mzr_sub, pks_parq_sub)
+```
+
+The replace function is in favour of the Parquet file format. Took less time and
+use less space.
+
+```{r}
+microbenchmark(
+    sps_mzr_rep <- replaceIntensitiesBelow(sps_mzr, threshold = 10, value = 0),
+    sps_parq_rep <- replaceIntensitiesBelow(sps_parq, threshold = 10, value = 0),
+    times = 10L, unit = "s"
+)
+
+print(object.size(sps_mzr_rep), units = "KB")
+print(object.size(sps_parq_rep), units = "KB")
+```
+
+## `Files_2`
+
+Open files with `Spectra()`. `files_2` contain 2 mzML.
+
+```{r}
+microbenchmark(
+    sps_mzr <- Spectra(files_2, source = MsBackendMzR()),
+    sps_parq <- Spectra(pq_files_2, source = MsBackendParquet()),
+    times = 10L, unit = "s"
+)
+```
+
+Comparing the (small) size, the object based on MsBackendParquet is smaller
+respect the MzR one.
+
+```{r}
+print(object.size(sps_mzr), units = "KB")
+print(object.size(sps_parq), units = "KB")
+```
+
+If we compare `spectraVariables()` between MzR and Parquet there is a
+difference. In the parquet there is an additional variables.
+
+```{r}
+setdiff(spectraVariables(sps_parq), spectraVariables(sps_mzr))
+```
+
+Next I compare the extraction of the peaks using `peaksData()`. The parquet
+method seems faster respect MzR. The function `expect_equal()` confirm that the
+results are the same.
+
+```{r}
+microbenchmark(
+    pks_mzr <- peaksData(sps_mzr),
+    pks_parq <- peaksData(sps_parq),
+    times = 10L, unit = "s"
+)
+
+expect_equal(pks_mzr, pks_parq)
+```
+
+In extracting the data using `spectraData()` the parquet seems a bit slower
+compared to MzR.
+
+```{r}
+microbenchmark(
+    spsData_mzr <- spectraData(sps_mzr, columns = c("msLevel", "spectrumId", "dataStorage")),
+    spsData_parq <- spectraData(sps_parq, columns = c("msLevel", "spectrumId", "dataStorage")),
+    times = 10L, unit = "s"
+)
+
+expect_equal(spsData_mzr, spsData_parq)
+
+```
+
+On the other hand, if we read the full data with `spectraData()`, the Parquet
+format is faster.
+In this case, the `expect_equal()` check fail due to the additional column
+detected before.
+
+```{r}
+microbenchmark(
+    spsData_mzr_full <- spectraData(sps_mzr, columns = union(spectraVariables(sps_mzr),
+                                        peaksVariables(sps_mzr))),
+    spsData_parq_full <- spectraData(sps_parq, columns = union(spectraVariables(sps_parq),
+                                        peaksVariables(sps_parq))),
+    times = 10L, unit = "s"
+)
+
+## expect_equal(spsData_mzr_full, spsData_parq_full)
+
+```
+
+I filter the data, the filter function took ~same time, the parquet object
+use more memory respect MzR.
+
+```{r}
+microbenchmark(
+    sps_mzr_sub <- filterValues(sps_mzr, spectraVariables = c("basePeakMZ", "rtime"),
+                            values = c(123.089, 230), tolerance = c(0,5),
+                            ppm = c(30, 0), match = "all"),
+    sps_parq_sub <- filterValues(sps_parq, spectraVariables = c("basePeakMZ", "rtime"),
+                            values = c(123.089, 230), tolerance = c(0,5),
+                            ppm = c(30, 0), match = "all"),
+    times = 10L, unit = "s"
+)
+
+print(object.size(sps_mzr_sub), units = "KB")
+print(object.size(sps_parq_sub), units = "KB")
+```
+
+Since the objects are smaller, also the difference in extracting the peaks is
+smaller.
+
+```{r}
+microbenchmark(
+    pks_mzr_sub <- peaksData(sps_mzr_sub),
+    pks_parq_sub <- peaksData(sps_parq_sub),
+    times = 10L, unit = "s"
+)
+
+expect_equal(pks_mzr_sub, pks_parq_sub)
+```
+
+The replace function is in favour of the Parquet file format. Took less time and
+use less space.
+
+```{r}
+microbenchmark(
+    sps_mzr_rep <- replaceIntensitiesBelow(sps_mzr, threshold = 10, value = 0),
+    sps_parq_rep <- replaceIntensitiesBelow(sps_parq, threshold = 10, value = 0),
+    times = 10L, unit = "s"
+)
+
+print(object.size(sps_mzr_rep), units = "KB")
+print(object.size(sps_parq_rep), units = "KB")
+```
+
+## `File_gz_1`
+
+Open file with `Spectra()`. `file_gz_1` contain a compressed mzML. In this case,
+the Parquet method is way faster since the mzML is compressed.
+
+```{r}
+microbenchmark(
+    sps_mzr <- Spectra(file_gz_1, source = MsBackendMzR()),
+    sps_parq <- Spectra(pq_file_gz_1, source = MsBackendParquet()),
+    times = 10L, unit = "s"
+)
+```
+
+Comparing the (small) size, the object based on MsBackendParquet is smaller
+respect the MzR one.
+
+```{r}
+print(object.size(sps_mzr), units = "KB")
+print(object.size(sps_parq), units = "KB")
+```
+
+If we compare `spectraVariables()` between MzR and Parquet there is a
+difference. In the parquet there is an additional variables.
+
+```{r}
+setdiff(spectraVariables(sps_parq), spectraVariables(sps_mzr))
+```
+
+Next I compare the extraction of the peaks using `peaksData()`. The parquet
+method seems faster respect MzR. The function `expect_equal()` confirm that the
+results are the same.
+
+```{r}
+microbenchmark(
+    pks_mzr <- peaksData(sps_mzr),
+    pks_parq <- peaksData(sps_parq),
+    times = 10L, unit = "s"
+)
+
+expect_equal(pks_mzr, pks_parq)
+```
+
+In extracting the data using `spectraData()` the parquet seems a bit slower
+compared to MzR.
+
+```{r}
+microbenchmark(
+    spsData_mzr <- spectraData(sps_mzr, columns = c("msLevel", "spectrumId", "dataStorage")),
+    spsData_parq <- spectraData(sps_parq, columns = c("msLevel", "spectrumId", "dataStorage")),
+    times = 10L, unit = "s"
+)
+
+expect_equal(spsData_mzr, spsData_parq)
+
+```
+
+On the other hand, if we read the full data with `spectraData()`, the Parquet
+format is faster.
+In this case, the `expect_equal()` check fail due to the additional column
+detected before.
+
+```{r}
+microbenchmark(
+    spsData_mzr_full <- spectraData(sps_mzr, columns = union(spectraVariables(sps_mzr),
+                                        peaksVariables(sps_mzr))),
+    spsData_parq_full <- spectraData(sps_parq, columns = union(spectraVariables(sps_parq),
+                                        peaksVariables(sps_parq))),
+    times = 10L, unit = "s"
+)
+
+## expect_equal(spsData_mzr_full, spsData_parq_full)
+
+```
+
+I filter the data, the filter function took ~same time, the parquet object
+also in this case use more memory.
+
+```{r}
+microbenchmark(
+    sps_mzr_sub <- filterValues(sps_mzr, spectraVariables = c("basePeakMZ", "rtime"),
+                            values = c(123.089, 230), tolerance = c(0,5),
+                            ppm = c(30, 0), match = "all"),
+    sps_parq_sub <- filterValues(sps_parq, spectraVariables = c("basePeakMZ", "rtime"),
+                            values = c(123.089, 230), tolerance = c(0,5),
+                            ppm = c(30, 0), match = "all"),
+    times = 10L, unit = "s"
+)
+
+print(object.size(sps_mzr_sub), units = "KB")
+print(object.size(sps_parq_sub), units = "KB")
+```
+
+Sice the objects are smaller, also the difference in extracting the peaks is
+smaller.
+
+```{r}
+microbenchmark(
+    pks_mzr_sub <- peaksData(sps_mzr_sub),
+    pks_parq_sub <- peaksData(sps_parq_sub),
+    times = 10L, unit = "s"
+)
+
+expect_equal(pks_mzr_sub, pks_parq_sub)
+```
+
+The replace function is in favour of the Parquet file format. Took less time and
+use less space.
+
+```{r}
+microbenchmark(
+    sps_mzr_rep <- replaceIntensitiesBelow(sps_mzr, threshold = 10, value = 0),
+    sps_parq_rep <- replaceIntensitiesBelow(sps_parq, threshold = 10, value = 0),
+    times = 10L, unit = "s"
+)
+
+print(object.size(sps_mzr_rep), units = "KB")
+print(object.size(sps_parq_rep), units = "KB")
+```
+
+## `Files_4`
+
+Open files with `Spectra()`. `files_4` contain 4 mzML.
+
+```{r}
+microbenchmark(
+    sps_mzr <- Spectra(files_4, source = MsBackendMzR()),
+    sps_parq <- Spectra(pq_files_4, source = MsBackendParquet()),
+    times = 10L, unit = "s"
+)
+```
+
+Comparing the (small) size, the object based on MsBackendParquet is smaller
+respect the MzR one.
+
+```{r}
+print(object.size(sps_mzr), units = "KB")
+print(object.size(sps_parq), units = "KB")
+```
+
+If we compare `spectraVariables()` between MzR and Parquet there is a
+difference. In the parquet there is an additional variables.
+
+```{r}
+setdiff(spectraVariables(sps_parq), spectraVariables(sps_mzr))
+```
+
+Next I compare the extraction of the peaks using `peaksData()`. The parquet
+method seems faster respect MzR. The function `expect_equal()` confirm that the
+results are the same.
+
+```{r}
+microbenchmark(
+    pks_mzr <- peaksData(sps_mzr),
+    pks_parq <- peaksData(sps_parq),
+    times = 10L, unit = "s"
+)
+
+expect_equal(pks_mzr, pks_parq)
+```
+
+In extracting the data using `spectraData()` the parquet seems a bit slower
+compared to MzR.
+
+```{r}
+microbenchmark(
+    spsData_mzr <- spectraData(sps_mzr, columns = c("msLevel", "spectrumId", "dataStorage")),
+    spsData_parq <- spectraData(sps_parq, columns = c("msLevel", "spectrumId", "dataStorage")),
+    times = 10L, unit = "s"
+)
+
+expect_equal(spsData_mzr, spsData_parq)
+
+```
+
+On the other hand, if we read the full data with `spectraData()`, the Parquet
+format is faster.
+In this case, the `expect_equal()` check fail due to the additional column
+detected before.
+
+```{r}
+microbenchmark(
+    spsData_mzr_full <- spectraData(sps_mzr, columns = union(spectraVariables(sps_mzr),
+                                        peaksVariables(sps_mzr))),
+    spsData_parq_full <- spectraData(sps_parq, columns = union(spectraVariables(sps_parq),
+                                        peaksVariables(sps_parq))),
+    times = 10L, unit = "s"
+)
+
+## expect_equal(spsData_mzr_full, spsData_parq_full)
+
+```
+
+I filter the data, the filter function took ~same time, the parquet object
+use more memory respect MzR.
+
+```{r}
+microbenchmark(
+    sps_mzr_sub <- filterValues(sps_mzr, spectraVariables = c("basePeakMZ", "rtime"),
+                            values = c(123.089, 230), tolerance = c(0,5),
+                            ppm = c(30, 0), match = "all"),
+    sps_parq_sub <- filterValues(sps_parq, spectraVariables = c("basePeakMZ", "rtime"),
+                            values = c(123.089, 230), tolerance = c(0,5),
+                            ppm = c(30, 0), match = "all"),
+    times = 10L, unit = "s"
+)
+
+print(object.size(sps_mzr_sub), units = "KB")
+print(object.size(sps_parq_sub), units = "KB")
+```
+
+Since the objects are smaller, also the difference in extracting the peaks is
+smaller.
+
+```{r}
+microbenchmark(
+    pks_mzr_sub <- peaksData(sps_mzr_sub),
+    pks_parq_sub <- peaksData(sps_parq_sub),
+    times = 10L, unit = "s"
+)
+
+expect_equal(pks_mzr_sub, pks_parq_sub)
+```
+
+The replace function is in favour of the Parquet file format. Took less time and
+use less space.
+
+```{r}
+microbenchmark(
+    sps_mzr_rep <- replaceIntensitiesBelow(sps_mzr, threshold = 10, value = 0),
+    sps_parq_rep <- replaceIntensitiesBelow(sps_parq, threshold = 10, value = 0),
+    times = 10L, unit = "s"
+)
+
+print(object.size(sps_mzr_rep), units = "KB")
+print(object.size(sps_parq_rep), units = "KB")
+```
