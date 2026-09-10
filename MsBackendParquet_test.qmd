@@ -103,9 +103,10 @@ microbenchmark({
 be
 ```
 
-# Test MzR vs Parquet
+# Test `MsBackendMzR` *vs* `MsBackendParquet`
 
-In this section I will compere the standard method against MsBackendParquet
+In this section I will compere the standard `MsBackendMzR` backend for *raw* MS
+data against the `MsBackendParquet` backend.
 
 ## `File_1`
 
@@ -119,8 +120,8 @@ microbenchmark(
 )
 ```
 
-Comparing the (small) size, the object based on MsBackendParquet is smaller
-respect the MzR one.
+Comparing the (small) size, the object based on `MsBackendParquet` is smaller
+compared to the `MsBackendMzR`.
 
 ```{r}
 print(object.size(sps_mzr), units = "KB")
@@ -148,82 +149,76 @@ microbenchmark(
 expect_equal(pks_mzr, pks_parq)
 ```
 
+We also evaluate extracting peaks data from selected spectra.
+
+```{r}
+set.seed(123)
+idx <- sample(seq_along(sps_mzr), 13)
+microbenchmark(
+    a <- sps_mzr[idx],
+    b <- sps_parq[idx],
+    times = 10L, unit = "s")
+
+microbenchmark(
+    A <- peaksData(a),
+    B <- peaksData(b),
+    times = 10L, unit = "s"
+)
+expect_equal(A, B)
+```
+
+The subset operation is faster on the `MsBackendParquet` (since less data needs
+to be subset). Extracting peaks data from the subset is however slower with `MsBackendParquet`.
+
 In extracting the data using `spectraData()` the parquet seems a bit slower
-compared to MzR.
+compared to `MsBackendMzR` for selected spectra variables.
 
 ```{r}
 microbenchmark(
-    spsData_mzr <- spectraData(sps_mzr, columns = c("msLevel", "spectrumId", "dataStorage")),
-    spsData_parq <- spectraData(sps_parq, columns = c("msLevel", "spectrumId", "dataStorage")),
+    spsData_mzr <- spectraData(
+        sps_mzr, columns = c("msLevel", "spectrumId", "dataStorage")),
+    spsData_parq <- spectraData(
+        sps_parq, columns = c("msLevel", "spectrumId", "dataStorage")),
     times = 10L, unit = "s"
 )
 
 expect_equal(spsData_mzr, spsData_parq)
-
 ```
 
-On the other hand, if we read the full data with `spectraData()`, the Parquet
-format is faster.
-In this case, the `expect_equal()` check fail due to the additional column
-detected before.
+On the other hand, if we read the full data with `spectraData()`, performance is
+about the same (also for a data subset; not shown).
 
 ```{r}
 microbenchmark(
-    spsData_mzr_full <- spectraData(sps_mzr, columns = union(spectraVariables(sps_mzr),
-                                        peaksVariables(sps_mzr))),
-    spsData_parq_full <- spectraData(sps_parq, columns = union(spectraVariables(sps_parq),
-                                        peaksVariables(sps_parq))),
+    a <- spectraData(sps_mzr),
+    b <- spectraData(sps_parq),
     times = 10L, unit = "s"
 )
 
-## expect_equal(spsData_mzr_full, spsData_parq_full)
-
+expect_equal(a[, intersect(colnames(a), colnames(b))],
+             b[, intersect(colnames(a), colnames(b))])
 ```
 
-I filter the data, the filter function took ~same time, the parquet object
-continue to use less memory.
+
+Replace functions for peaks data (*m/z* or intensity) are not applied
+immediately but cached in the `Spectra` object. Thus, these are independent of
+the underlying backend. Replacement functions of spectra variables on the other
+hand will be applied immediately, in the case of `MsBackendMzR` adding/replacing
+the values in the internal `data.frame` with all spectra metadata, in the case
+of the `MsBackendParquet` (presumably) an internal cache.
 
 ```{r}
+rt <- rtime(sps_mzr)
 microbenchmark(
-    sps_mzr_sub <- filterValues(sps_mzr, spectraVariables = c("basePeakMZ", "rtime"),
-                            values = c(123.089, 230), tolerance = c(0,5),
-                            ppm = c(30, 0), match = "all"),
-    sps_parq_sub <- filterValues(sps_parq, spectraVariables = c("basePeakMZ", "rtime"),
-                            values = c(123.089, 230), tolerance = c(0,5),
-                            ppm = c(30, 0), match = "all"),
+    sps_mzr$rtime <- rt + 10,
+    sps_parq$rtime <- rt + 10,
     times = 10L, unit = "s"
 )
 
-print(object.size(sps_mzr_sub), units = "KB")
-print(object.size(sps_parq_sub), units = "KB")
+expect_equal(rtime(sps_mzr), rtime(sps_parq))
 ```
 
-Sice the objects are smaller, also the difference in extracting the peaks is
-smaller.
-
-```{r}
-microbenchmark(
-    pks_mzr_sub <- peaksData(sps_mzr_sub),
-    pks_parq_sub <- peaksData(sps_parq_sub),
-    times = 10L, unit = "s"
-)
-
-expect_equal(pks_mzr_sub, pks_parq_sub)
-```
-
-The replace function is in favour of the Parquet file format. Took less time and
-use less space.
-
-```{r}
-microbenchmark(
-    sps_mzr_rep <- replaceIntensitiesBelow(sps_mzr, threshold = 10, value = 0),
-    sps_parq_rep <- replaceIntensitiesBelow(sps_parq, threshold = 10, value = 0),
-    times = 10L, unit = "s"
-)
-
-print(object.size(sps_mzr_rep), units = "KB")
-print(object.size(sps_parq_rep), units = "KB")
-```
+Replacing values in the `MsBackendParquet` are faster.
 
 ## `Files_2`
 
@@ -578,4 +573,176 @@ microbenchmark(
 
 print(object.size(sps_mzr_rep), units = "KB")
 print(object.size(sps_parq_rep), units = "KB")
+```
+
+## Summary
+
+# Comparing `MsBackendSql` *vs* `MsBackendParquet`
+
+Both the `MsBackendSql` and `MsBackendParquet` store the MS data in their
+respective own format, the former in a single SQL database, the latter in per
+data-origin Parquet files.
+
+We need to first create a SQL database for the `MsBackendSql`. For the tests we
+will use the *largest* data set since both backends are developed for
+large-scale data.
+
+```{r}
+library(MsBackendSql)
+
+#' Create the SQLite database
+library(RSQLite)
+dbc <- dbConnect(SQLite(), "./files_4.sqlite")
+createMsBackendSqlDatabase(dbc, files_4)
+dbDisconnect(dbc)
+
+sps_sql <- Spectra(dbname = "files_4.sqlite", source = MsBackendOfflineSql(),
+                   drv = SQLite())
+sps_parq <- Spectra(pq_files_4, source = MsBackendParquet())
+
+print(object.size(sps_sql), units = "KB")
+print(object.size(sps_parq), units = "KB")
+```
+
+Both backends have a very low memory footprint. Next we compare the time to get
+the **full** spectra metadata data from the `Spectra` objects.
+
+```{r}
+microbenchmark(
+    a <- spectraData(sps_sql),
+    b <- spectraData(sps_parq),
+    times = 10L, unit = "s"
+)
+
+expect_equal(a[, !colnames(a) == "dataStorage"],
+             b[, !colnames(b) == "dataStorage"])
+```
+
+Extracting spectra data from `MsBackendParquet` is faster (maybe because there
+is some caching involved?).
+
+We evaluate also extraction of a single spectra variable.
+
+```{r}
+microbenchmark(
+    a <- rtime(sps_sql),
+    b <- rtime(sps_parq),
+    times = 10L, unit = "s"
+)
+
+expect_equal(a, b)
+```
+
+Also for a single spectrum variable `MsBackendParquet` is considerably faster.
+
+We next compare extracting peaks data.
+
+```{r}
+microbenchmark(
+    a <- peaksData(sps_sql),
+    b <- peaksData(sps_parq),
+    times = 10L, unit = "s"
+)
+
+expect_equal(a, b)
+```
+
+Performance is very similar for both backends.
+
+Next we compare the time it takes to subset the `Spectra` objects to random
+spectra.
+
+```{r}
+set.seed(123)
+idx <- sample(seq_along(sps_sql), 23)
+
+microbenchmark(
+    a <- sps_sql[idx],
+    b <- sps_parq[idx],
+    times = 10L, unit = "s"
+)
+```
+
+Since both essentially just subset the spectra's primary keys their performance
+is comparable.
+
+Next we evaluate the time it takes to extract the **full** spectra data.
+
+```{r}
+microbenchmark(
+    A <- spectraData(a),
+    B <- spectraData(b),
+    times = 10L, unit = "s"
+)
+
+expect_equal(
+    A[, colnames(A) != "dataStorage"],
+    B[, colnames(B) != "dataStorage"]
+)
+```
+
+`MsBackendParquet` has performance advantages in extracting the full spectra
+data.
+
+We check also the performance for a single spectra variable:
+
+```{r}
+microbenchmark(
+    A <- rtime(a),
+    B <- rtime(b),
+    times = 10L, unit = "s"
+)
+
+expect_equal(A, B)
+```
+
+Also for a single spectra variable `MsBackendParquet` is faster.
+
+Evaluating extraction of the peaks data.
+
+```{r}
+microbenchmark(
+    A <- peaksData(a),
+    B <- peaksData(b),
+    times = 10L, unit = "s"
+)
+
+expect_equal(A, B)
+```
+
+Here the `MsBackendSql` has performance advantages.
+
+Checking if the order of spectra matters.
+
+```{r}
+idx <- sort(idx)
+a <- sps_sql[idx]
+b <- sps_parq[idx]
+
+microbenchmark(
+    A <- peaksData(a),
+    B <- peaksData(b),
+    times = 10L, unit = "s"
+)
+expect_equal(A, B)
+```
+
+The order of the spectra does not affect the performance of `MsBackendParquet`.
+
+
+## Summary
+
+- *spectra metadata*: `MsBackendParquet` is faster extracting the **full**
+  spectra data and also single spectra variables. This performance advantage is
+  present for the full data, but also for a subset of spectra in random order
+  (same is true for an ordered subset of samples).
+- Performance to extract the peaks data is about the same for both backends when
+  the **full** data is used. For subsets of spectra (ordered or not)
+  `MsBackendSql` is considerably faster (presumably because of the more
+  efficient row extraction or the BLOB data type).
+
+# Session information
+
+```{r}
+sessionInfo()
 ```
